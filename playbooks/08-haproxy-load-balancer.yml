@@ -1,0 +1,44 @@
+---
+# Playbook 8: HAProxy Load Balancer Configuration
+- name: Configure HAProxy Load Balancer
+  hosts: loadbalancers
+  become: yes
+  tasks:
+    - name: Install HAProxy
+      apt: name=haproxy state=present
+    - name: Backup original config
+      copy: src=/etc/haproxy/haproxy.cfg dest=/etc/haproxy/haproxy.cfg.bak
+    - name: Configure HAProxy
+      copy:
+        content: |
+          global
+            log /dev/log local0
+            maxconn 2048
+            daemon
+          defaults
+            log global
+            mode http
+            option httplog
+            option denylog
+            timeout connect 5000
+            timeout client 50000
+            timeout server 50000
+          frontend web
+            bind *:80
+            default_backend webservers
+          backend webservers
+            balance roundrobin
+            server web1 192.168.1.10:80 check
+            server web2 192.168.1.11:80 check
+            server web3 192.168.1.12:80 check
+        dest: /etc/haproxy/haproxy.cfg
+      notify: restart haproxy
+    - name: Enable HAProxy
+      service: name=haproxy enabled=yes state=started
+    - name: Check HAProxy status
+      shell: systemctl status haproxy
+      register: haproxy_status
+    - debug: msg="{{ haproxy_status.stdout }}"
+  handlers:
+    - name: restart haproxy
+      service: name=haproxy state=restarted
