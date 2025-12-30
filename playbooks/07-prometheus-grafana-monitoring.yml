@@ -1,0 +1,28 @@
+---
+# Playbook 7: Prometheus and Grafana Monitoring Stack
+- name: Deploy Prometheus and Grafana
+  hosts: monitoring
+  become: yes
+  tasks:
+    - name: Install Prometheus
+      block:
+        - user: name=prometheus state=present
+        - get_url: url=https://github.com/prometheus/prometheus/releases/download/v2.40.0/prometheus-2.40.0.linux-amd64.tar.gz dest=/tmp/
+        - shell: tar xzf /tmp/prometheus-2.40.0.linux-amd64.tar.gz -C /opt/ && ln -s /opt/prometheus-2.40.0 /opt/prometheus
+        - copy: src=/opt/prometheus/prometheus.yml.sample dest=/opt/prometheus/prometheus.yml
+    - name: Install Grafana
+      apt:
+        name: grafana-server
+        state: present
+    - name: Start services
+      service:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      loop: [grafana-server]
+    - name: Verify installation
+      shell: |
+        curl -s http://localhost:9090/-/healthy || echo 'Prometheus not ready'
+        curl -s http://localhost:3000/api/health || echo 'Grafana not ready'
+      register: health_check
+    - debug: msg="{{ health_check.stdout_lines }}"
