@@ -1,0 +1,164 @@
+---
+# Playbook: 02-linux-security-hardening.yml
+# Description: CIS Benchmark compliance, SSH hardening, firewall configuration, SELinux, and system security
+# Author: Manjunathsmurthy
+
+- name: Linux Security Hardening
+  hosts: all
+  become: yes
+  gather_facts: yes
+  vars:
+    ssh_port: 2222
+    disable_root_login: true
+    enable_firewall: true
+    selinux_state: enforcing
+    max_auth_tries: 3
+    client_alive_interval: 300
+
+  tasks:
+    # SSH Hardening
+    - name: Configure SSH port
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?Port'
+        line: "Port {{ ssh_port }}"
+        validate: sshd -T -f %s
+      notify: restart sshd
+
+    - name: Disable root SSH login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+        validate: sshd -T -f %s
+      when: disable_root_login
+      notify: restart sshd
+
+    - name: Disable password authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+        validate: sshd -T -f %s
+      notify: restart sshd
+
+    - name: Configure SSH timeout
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        line: "{{ item }}"
+        create: yes
+      loop:
+        - "ClientAliveInterval {{ client_alive_interval }}"
+        - "ClientAliveCountMax 2"
+        - "MaxAuthTries {{ max_auth_tries }}"
+      notify: restart sshd
+
+    # Firewall Configuration (UFW for Debian/Ubuntu)
+    - name: Install UFW
+      apt:
+        name: ufw
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+      when: enable_firewall and ansible_os_family == 'Debian'
+
+    - name: Allow SSH port
+      ufw:
+        rule: allow
+        port: "{{ ssh_port }}"
+        proto: tcp
+      when: enable_firewall and ansible_os_family == 'Debian'
+
+    - name: Allow HTTP and HTTPS
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: ['80', '443']
+      when: enable_firewall and ansible_os_family == 'Debian'
+
+    # File Permissions Hardening
+    - name: Set secure permissions on sudoers
+      file:
+        path: /etc/sudoers
+        mode: '0440'
+
+    - name: Set secure permissions on shadow file
+      file:
+        path: /etc/shadow
+        mode: '0000'
+
+    # Disable Unnecessary Services
+    - name: Disable unnecessary services
+      service:
+        name: "{{ item }}"
+        enabled: no
+        state: stopped
+      loop: ['cups', 'avahi-daemon', 'isc-dhcp-server']
+      ignore_errors: yes
+
+    # Kernel Hardening
+    - name: Configure kernel parameters for security
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_set: yes
+        state: present
+      loop:
+        - {key: 'net.ipv4.conf.all.send_redirects', value: '0'}
+        - {key: 'net.ipv4.conf.all.accept_redirects', value: '0'}
+        - {key: 'net.ipv4.icmp_echo_ignore_broadcasts', value: '1'}
+        - {key: 'net.ipv4.ip_forward', value: '0'}
+        - {key: 'kernel.unprivileged_userns_clone', value: '0'}
+
+    # SELinux Configuration (RHEL/CentOS)
+    - name: Set SELinux state to enforcing
+      selinux:
+        policy: targeted
+        state: "{{ selinux_state }}"
+      when: ansible_os_family == 'RedHat'
+
+    # Account Lockout Policy
+    - name: Configure account lockout
+      lineinfile:
+        path: /etc/pam.d/common-auth
+        line: "auth required pam_tally2.so onerr=fail audit silent deny=5 unlock_time=900"
+        create: yes
+      when: ansible_os_family == 'Debian'
+
+    # Audit Configuration
+    - name: Install and configure auditd
+      package:
+        name: auditd
+        state: present
+
+    - name: Enable auditd service
+      service:
+        name: auditd
+        state: started
+        enabled: yes
+
+    # Verify Security Compliance
+    - name: Run security checks
+      shell: |
+        echo "SSH Configuration:"
+        grep -E '^Port|^PermitRootLogin|^PasswordAuthentication' /etc/ssh/sshd_config
+        echo ""
+        echo "Firewall Status:"
+        ufw status
+      register: security_check
+
+    - name: Display security verification
+      debug:
+        msg: "{{ security_check.stdout_lines }}"
+
+  handlers:
+    - name: restart sshd
+      service:
+        name: sshd
+        state: restarted
