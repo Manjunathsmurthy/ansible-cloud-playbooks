@@ -1,0 +1,24 @@
+---
+# Playbook 5: LEMP Web Stack Deployment
+- name: Deploy LEMP Stack
+  hosts: webservers
+  become: yes
+  tasks:
+    - name: Install LEMP components
+      apt:
+        name: [nginx, php-fpm, php-mysql, mysql-server]
+        state: present
+        update_cache: yes
+    - name: Configure Nginx
+      service: name=nginx enabled=yes state=started
+    - name: Configure MySQL
+      service: name=mysql enabled=yes state=started
+    - name: Create website directory
+      file: path=/var/www/html state=directory mode=0755
+    - name: Deploy SSL certificate
+      shell: apt install certbot python3-certbot-nginx
+      ignore_errors: yes
+    - name: Verify installation
+      shell: nginx -v && php -v && mysql --version
+      register: versions
+    - debug: msg="{{ versions.stdout_lines }}"
