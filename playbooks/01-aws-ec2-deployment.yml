@@ -1,0 +1,171 @@
+---
+# Playbook: 01-aws-ec2-deployment.yml
+# Description: Deploy and configure AWS EC2 instances with security groups, EBS volumes, and monitoring
+# Author: Manjunathsmurthy
+# Date: 2025-01-01
+
+- name: Deploy AWS EC2 Instances
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    instance_count: 3
+    instance_type: t3.medium
+    image_id: ami-0c94855ba95c574c8  # Ubuntu 22.04 LTS
+    key_name: my-aws-key
+    security_group: default-sg
+    region: us-east-1
+    environment: production
+    vpc_subnet_id: subnet-12345678
+    root_volume_size: 30
+    ebs_volume_size: 50
+    enable_monitoring: true
+
+  tasks:
+    - name: Create security group
+      amazon.aws.ec2_group:
+        name: "{{ security_group }}"
+        description: Security group for EC2 instances
+        region: "{{ region }}"
+        rules:
+          - proto: tcp
+            ports:
+              - 22
+            cidr_ip: 0.0.0.0/0
+            rule_desc: SSH access
+          - proto: tcp
+            ports:
+              - 80
+            cidr_ip: 0.0.0.0/0
+            rule_desc: HTTP access
+          - proto: tcp
+            ports:
+              - 443
+            cidr_ip: 0.0.0.0/0
+            rule_desc: HTTPS access
+      register: security_group_result
+
+    - name: Launch EC2 instances
+      amazon.aws.ec2_instance:
+        image_id: "{{ image_id }}"
+        instance_type: "{{ instance_type }}"
+        count: "{{ instance_count }}"
+        key_name: "{{ key_name }}"
+        security_groups: "{{ security_group }}"
+        region: "{{ region }}"
+        subnet_id: "{{ vpc_subnet_id }}"
+        monitoring: "{{ enable_monitoring }}"
+        wait: true
+        wait_timeout: 300
+        tags:
+          Name: "ec2-instance-{{ ansible_date_time.iso8601_basic_short }}"
+          Environment: "{{ environment }}"
+          ManagedBy: Ansible
+      register: ec2_instances
+
+    - name: Configure root volume
+      amazon.aws.ec2_vol:
+        instance: "{{ item.instance_id }}"
+        region: "{{ region }}"
+        volume_size: "{{ root_volume_size }}"
+        device_name: /dev/sda1
+      loop: "{{ ec2_instances.instances }}"
+
+    - name: Create and attach EBS volumes
+      amazon.aws.ec2_vol:
+        instance: "{{ item.instance_id }}"
+        region: "{{ region }}"
+        volume_size: "{{ ebs_volume_size }}"
+        device_name: /dev/sdf
+        delete_on_termination: true
+      loop: "{{ ec2_instances.instances }}"
+
+    - name: Wait for instances to be running
+      amazon.aws.ec2_instance_info:
+        instance_ids: "{{ ec2_instances.instance_ids }}"
+        region: "{{ region }}"
+      register: running_instances
+      until: running_instances.instances[0].state.name == 'running'
+      retries: 30
+      delay: 10
+
+    - name: Display instance information
+      debug:
+        msg: |
+          Instance: {{ item.instance_id }}
+          Private IP: {{ item.private_ip_address }}
+          Public IP: {{ item.public_ip_address }}
+          State: {{ item.state.name }}
+      loop: "{{ running_instances.instances }}"
+
+    - name: Add instances to inventory
+      add_host:
+        name: "{{ item.public_ip_address }}"
+        groups: aws_ec2_instances
+        ansible_host: "{{ item.public_ip_address }}"
+        ansible_user: ubuntu
+        instance_id: "{{ item.instance_id }}"
+      loop: "{{ running_instances.instances }}"
+
+    - name: Enable CloudWatch detailed monitoring
+      amazon.aws.ec2_instance:
+        instance_ids: "{{ ec2_instances.instance_ids }}"
+        region: "{{ region }}"
+        monitoring:
+          state: enabled
+      when: enable_monitoring
+
+    - name: Create backup snapshot schedule
+      amazon.aws.ec2_snapshot_copy:
+        source_snapshot_id: snap-12345678
+        source_region: "{{ region }}"
+        region: "{{ region }}"
+        description: "Automated backup from Ansible"
+      ignore_errors: true
+
+  handlers:
+    - name: Notify deployment complete
+      debug:
+        msg: "EC2 instances deployed successfully"
+
+- name: Configure EC2 instances
+  hosts: aws_ec2_instances
+  gather_facts: yes
+  become: yes
+  tasks:
+    - name: Update system packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+      when: ansible_os_family == 'Debian'
+
+    - name: Install CloudWatch agent
+      shell: |
+        wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+        dpkg -i -E ./amazon-cloudwatch-agent.deb
+      ignore_errors: true
+
+    - name: Configure hostname
+      hostname:
+        name: "ec2-{{ inventory_hostname_short }}"
+
+    - name: Sync system time
+      service:
+        name: chronyd
+        state: started
+        enabled: yes
+
+    - name: Create monitoring directory
+      file:
+        path: /opt/monitoring
+        state: directory
+        mode: '0755'
+
+    - name: Verify EC2 instance metadata
+      uri:
+        url: http://169.254.169.254/latest/meta-data/instance-id
+        return_content: yes
+      register: instance_id_check
+
+    - name: Display instance metadata
+      debug:
+        msg: "Instance ID from metadata: {{ instance_id_check.content }}"
