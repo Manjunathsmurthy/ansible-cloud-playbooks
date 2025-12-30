@@ -1,0 +1,47 @@
+---
+# Playbook 6: MySQL/PostgreSQL Master-Slave Replication
+- name: Setup Database Replication
+  hosts: db_servers
+  become: yes
+  tasks:
+    - name: Install MySQL server
+      apt: name=mysql-server state=present
+    - name: Configure master replication
+      lineinfile:
+        path: /etc/mysql/mysql.conf.d/mysqld.cnf
+        line: "{{ item }}"
+      loop:
+        - "server-id = 1"
+        - "log_bin = /var/log/mysql/mysql-bin.log"
+      notify: restart mysql
+    - name: Create replication user
+      mysql_user:
+        name: repl
+        password: repl_password
+        priv: '*.*:REPLICATION SLAVE'
+        state: present
+      ignore_errors: yes
+    - name: Get master status
+      mysql_query:
+        login_db: mysql
+        query: "SHOW MASTER STATUS"
+      register: master_status
+    - name: Configure slave replication
+      mysql_query:
+        login_db: mysql
+        query: "CHANGE MASTER TO MASTER_HOST='master_ip', MASTER_USER='repl', MASTER_PASSWORD='repl_password'"
+      when: inventory_hostname != 'master'
+    - name: Start slave
+      mysql_query:
+        login_db: mysql
+        query: "START SLAVE"
+      when: inventory_hostname != 'master'
+    - name: Check slave status
+      mysql_query:
+        login_db: mysql
+        query: "SHOW SLAVE STATUS"
+      register: slave_status
+    - debug: msg="{{ slave_status.query_result }}"
+  handlers:
+    - name: restart mysql
+      service: name=mysql state=restarted
